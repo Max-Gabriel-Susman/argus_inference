@@ -1,0 +1,30 @@
+name: ROS 2 CI (argus_inference)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    container:
+      image: rostooling/setup-ros-docker:ubuntu-jammy-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and test argus_inference
+        uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          package-name: argus_inference
+          target-ros2-distro: humble
+          colcon-defaults: |
+            {
+              "build": {
+                "symlink-install": true
+              }
+            }
