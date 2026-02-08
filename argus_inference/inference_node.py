@@ -3,6 +3,8 @@ from rclpy.node import Node
 
 
 class InferenceNode(Node):
+    """ROS 2 motor cortex intent prediction proof of concept node."""
+
     def __init__(self):
         super().__init__('argus_inference')
         self.get_logger().info('argus_inference online')
