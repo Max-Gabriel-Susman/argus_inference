@@ -1,12 +1,12 @@
 import math
-import os
 from dataclasses import dataclass
+import os
 from typing import Optional, Tuple
 
 import h5py
 import numpy as np
-import rclpy
 from geometry_msgs.msg import Twist
+import rclpy
 from rclpy.node import Node
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import train_test_split
