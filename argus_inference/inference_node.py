@@ -1,4 +1,4 @@
-// inference_node.py
+# inference_node.py
 import math
 from dataclasses import dataclass
 import os
@@ -9,26 +9,29 @@ import numpy as np
 from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from argus_core.msg import NeuralFrame
+
 
 @dataclass(frozen=True)
 class Dataset:
-    t: np.ndarray           # (T,)
-    cursor_xy: np.ndarray   # (T, 2)
-    target_xy: np.ndarray   # (T, 2)
-    spikes_ref: np.ndarray  # (units, channels) of object refs
+    t: np.ndarray
+    cursor_xy: np.ndarray
+    target_xy: np.ndarray
+    spikes_ref: np.ndarray
 
 
 def _load_mat_v73(path: str) -> Dataset:
     with h5py.File(path, "r") as f:
-        t = np.array(f["/t"]).squeeze().astype(np.float64)  # (T,)
-        cursor = np.array(f["/cursor_pos"]).T.astype(np.float64)  # (T,2)
-        target = np.array(f["/target_pos"]).T.astype(np.float64)  # (T,2)
-        spikes_ref = np.array(f["/spikes"])  # (5,96) dtype=object (refs)
+        t = np.array(f["/t"]).squeeze().astype(np.float64)
+        cursor = np.array(f["/cursor_pos"]).T.astype(np.float64)
+        target = np.array(f["/target_pos"]).T.astype(np.float64)
+        spikes_ref = np.array(f["/spikes"])
 
     return Dataset(t=t, cursor_xy=cursor, target_xy=target, spikes_ref=spikes_ref)
 
@@ -57,7 +60,7 @@ def _build_features_and_labels(
     bin_times = edges[:-1] + 0.5 * bin_s
     n_bins = bin_times.shape[0]
 
-    n_units, n_ch = ds.spikes_ref.shape  # (5,96)
+    n_units, n_ch = ds.spikes_ref.shape
     _ = n_units
     if max_channels is None:
         max_channels = n_ch
@@ -82,7 +85,6 @@ def _build_features_and_labels(
     dy = vec[:, 1]
     ang = np.arctan2(dy, dx)
 
-    # 4-way: 0=RIGHT, 1=UP, 2=LEFT, 3=DOWN
     y = np.zeros((n_bins,), dtype=np.int64)
     y[(ang >= math.pi / 4) & (ang < 3 * math.pi / 4)] = 1
     y[(ang >= 3 * math.pi / 4) | (ang < -3 * math.pi / 4)] = 2
@@ -94,11 +96,6 @@ def _build_features_and_labels(
 def _intent_to_twist(intent: int) -> Twist:
     msg = Twist()
 
-    # Simple mapping:
-    # 0 RIGHT  -> turn right while moving forward a bit
-    # 1 UP     -> forward
-    # 2 LEFT   -> turn left while moving forward a bit
-    # 3 DOWN   -> reverse
     if intent == 1:
         msg.linear.x = 0.25
         msg.angular.z = 0.0
@@ -108,7 +105,7 @@ def _intent_to_twist(intent: int) -> Twist:
     elif intent == 2:
         msg.linear.x = 0.15
         msg.angular.z = 0.7
-    else:  # intent == 0
+    else:
         msg.linear.x = 0.15
         msg.angular.z = -0.7
 
@@ -116,8 +113,6 @@ def _intent_to_twist(intent: int) -> Twist:
 
 
 class InferenceNode(Node):
-    """ROS 2 proof-of-concept node: decode reaching intent and publish /cmd_vel."""
-
     def __init__(self) -> None:
         super().__init__("argus_inference")
 
@@ -135,7 +130,18 @@ class InferenceNode(Node):
         self._unit_index = int(os.environ.get("ARGUS_UNIT_INDEX", "1"))
         self._max_channels = int(os.environ.get("ARGUS_MAX_CHANNELS", "96"))
 
-        self._pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self._input_topic = (
+            self.declare_parameter(
+                "input_topic", "/argus/sensors/neural_telemetry"
+            ).value
+        )
+        self._cmd_topic = (
+            self.declare_parameter(
+                "cmd_topic", "/cmd_vel"
+            ).value
+        )
+
+        self._pub = self.create_publisher(Twist, self._cmd_topic, 10)
 
         self.get_logger().info(f"dataset: {self._dataset_path}")
         self.get_logger().info(
@@ -143,7 +149,7 @@ class InferenceNode(Node):
             f"max_channels={self._max_channels}"
         )
 
-        X, y, bin_times = _build_features_and_labels(
+        X, y, _ = _build_features_and_labels(
             path=self._dataset_path,
             bin_s=self._bin_s,
             unit_index=self._unit_index,
@@ -162,39 +168,47 @@ class InferenceNode(Node):
         acc = float(self._model.score(X_test, y_test))
         self.get_logger().info(f"offline 4-way intent accuracy: {acc:.3f}")
 
-        # Replay state
-        self._X_replay = X
-        self._bin_times = bin_times
-        self._i = 0
+        self._rx_count = 0
 
-        period_s = self._bin_s
-        self._timer = self.create_timer(period_s, self._tick)
+        self._sub = self.create_subscription(
+            NeuralFrame,
+            self._input_topic,
+            self._neural_callback,
+            qos_profile_sensor_data,
+        )
 
-        self.get_logger().info("argus_inference online (publishing /cmd_vel)")
+        self.get_logger().info(
+            f"argus_inference online: subscribing to '{self._input_topic}' "
+            f"and publishing '{self._cmd_topic}'"
+        )
 
-    def _tick(self) -> None:
-        if self._i >= self._X_replay.shape[0]:
-            self.get_logger().info("replay finished; publishing stop and shutting down")
-            stop = Twist()
-            self._pub.publish(stop)
-            rclpy.shutdown()
+    def _frame_to_features(self, msg: NeuralFrame) -> np.ndarray:
+        x = np.zeros((1, self._max_channels), dtype=np.float32)
+
+        usable = min(int(msg.channel_count), self._max_channels, len(msg.channels))
+        for i in range(usable):
+            x[0, i] = float(msg.channels[i])
+
+        return x
+
+    def _neural_callback(self, msg: NeuralFrame) -> None:
+        if msg.channel_count == 0:
+            self.get_logger().warning("Received empty neural frame")
             return
 
-        x = self._X_replay[self._i: self._i + 1]
+        x = self._frame_to_features(msg)
         pred = int(self._model.predict(x)[0])
 
         cmd = _intent_to_twist(pred)
         self._pub.publish(cmd)
 
-        # log occasionally to avoid spamming
-        if self._i % 20 == 0:
-            bt = float(self._bin_times[self._i])
+        if self._rx_count % 20 == 0:
             self.get_logger().info(
-                f"t={bt:.2f}s intent={pred} -> "
+                f"sample={msg.sample} t={msg.t:.3f} intent={pred} -> "
                 f"vx={cmd.linear.x:.2f} wz={cmd.angular.z:.2f}"
             )
 
-        self._i += 1
+        self._rx_count += 1
 
 
 def main() -> None:
