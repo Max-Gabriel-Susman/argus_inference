@@ -112,6 +112,7 @@ def _intent_to_twist(intent: int) -> Twist:
 
 
 class InferenceNode(Node):
+
     def __init__(self) -> None:
         super().__init__("argus_inference")
 

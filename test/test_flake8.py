@@ -23,6 +23,7 @@ import pytest
 def test_flake8():
     config = os.path.join(
         os.path.dirname(__file__), os.pardir, 'ament_flake8.ini')
+    assert os.path.isfile(config), 'config not found at %s' % config
     rc, errors = main_with_errors(argv=['--config', config])
     assert rc == 0, \
         'Found %d code style errors / warnings:\n' % len(errors) + \
