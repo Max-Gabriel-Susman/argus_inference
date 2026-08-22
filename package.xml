@@ -12,6 +12,9 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <exec_depend>argus_core</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-h5py</exec_depend>
+  <exec_depend>python3-sklearn</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
