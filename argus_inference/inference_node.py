@@ -1,12 +1,13 @@
 # inference_node.py
-import math
 from dataclasses import dataclass
+import math
 import os
 from typing import Optional, Tuple
 
+from argus_core.msg import NeuralFrame
+from geometry_msgs.msg import Twist
 import h5py
 import numpy as np
-from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -14,8 +15,6 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-
-from argus_core.msg import NeuralFrame
 
 
 @dataclass(frozen=True)
