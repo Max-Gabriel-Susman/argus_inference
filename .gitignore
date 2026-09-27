@@ -40,4 +40,5 @@ Thumbs.db
 .env.*
 
 scripts/
-data/indy_20161005_06_broadband.nwb
+data/indy_20161005_06_broadband.nwbdata/*.mat
+data/*.nwb
