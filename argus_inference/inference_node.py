@@ -2,7 +2,8 @@
 from dataclasses import dataclass
 import math
 import os
-from typing import Optional, Tuple
+import pickle
+from typing import Optional, Sequence, Tuple
 
 from argus_core.msg import NeuralFrame
 from geometry_msgs.msg import Twist
@@ -92,6 +93,53 @@ def _build_features_and_labels(
     return X, y, bin_times
 
 
+_FRAME_FIELDS = {"counts": "channels", "power": "power"}
+
+
+def _load_model_bundle(path: str):
+    """
+    Load a decode_test.py --save-model pickle: (pipeline, layout).
+
+    Only load pickles you made; unpickling runs code.
+    """
+    with open(path, "rb") as f:
+        return _check_model_bundle(pickle.load(f), path)
+
+
+def _check_model_bundle(bundle, source: str):
+    pipeline = bundle["pipeline"]
+    layout = bundle["layout"]
+    features = list(layout["features"])
+    unknown = [name for name in features if name not in _FRAME_FIELDS]
+    if not features or unknown:
+        raise RuntimeError(
+            f"{source}: layout features {features} not all in {sorted(_FRAME_FIELDS)}"
+        )
+    channels = int(layout["channels"])
+    expected = len(features) * channels
+    n_in = getattr(pipeline, "n_features_in_", expected)
+    if n_in != expected:
+        raise RuntimeError(
+            f"{source}: pipeline takes {n_in} features, layout describes {expected}"
+        )
+    return pipeline, layout
+
+
+def _frame_features(msg, features: Sequence[str], channels: int) -> np.ndarray:
+    """
+    Build the feature vector, [counts..., power...] in layout order.
+
+    Channels beyond channel_count are left at zero, as the .mat path does.
+    """
+    x = np.zeros((1, len(features) * channels), dtype=np.float32)
+    for k, name in enumerate(features):
+        values = getattr(msg, _FRAME_FIELDS[name])
+        usable = min(int(msg.channel_count), channels, len(values))
+        for i in range(usable):
+            x[0, k * channels + i] = float(values[i])
+    return x
+
+
 def _intent_to_twist(intent: int) -> Twist:
     msg = Twist()
 
@@ -116,15 +164,8 @@ class InferenceNode(Node):
     def __init__(self) -> None:
         super().__init__("argus_inference")
 
-        dataset_path = os.environ.get("ARGUS_DATASET_PATH")
-        if not dataset_path:
-            raise RuntimeError(
-                "ARGUS_DATASET_PATH is not set.\n"
-                "Example:\n"
-                "  ARGUS_DATASET_PATH=$HOME/Documents/datasets/indy_loco/indy_20161005_06.mat "
-                "ros2 run argus_inference inference_node"
-            )
-        self._dataset_path = os.path.expanduser(dataset_path)
+        model_path = os.environ.get("ARGUS_MODEL_PATH")
+        self._layout = None
 
         self._bin_s = float(os.environ.get("ARGUS_BIN_S", "0.05"))
         self._unit_index = int(os.environ.get("ARGUS_UNIT_INDEX", "1"))
@@ -143,6 +184,48 @@ class InferenceNode(Node):
 
         self._pub = self.create_publisher(Twist, self._cmd_topic, 10)
 
+        if model_path:
+            self._load_saved_model(os.path.expanduser(model_path))
+        else:
+            self._train_on_mat()
+
+        self._rx_count = 0
+
+        self._sub = self.create_subscription(
+            NeuralFrame,
+            self._input_topic,
+            self._neural_callback,
+            qos_profile_sensor_data,
+        )
+
+        self.get_logger().info(
+            f"argus_inference online: subscribing to '{self._input_topic}' "
+            f"and publishing '{self._cmd_topic}'"
+        )
+
+    def _load_saved_model(self, path: str) -> None:
+        self._model, self._layout = _load_model_bundle(path)
+        self.get_logger().info(
+            f"model path: ARGUS_MODEL_PATH={path} (saved model; "
+            f"features={self._layout['features']} channels={self._layout['channels']} "
+            f"mult={self._layout.get('mult')} bin_len={self._layout.get('bin_len')})"
+        )
+
+    def _train_on_mat(self) -> None:
+        dataset_path = os.environ.get("ARGUS_DATASET_PATH")
+        if not dataset_path:
+            raise RuntimeError(
+                "Neither ARGUS_MODEL_PATH nor ARGUS_DATASET_PATH is set.\n"
+                "Example:\n"
+                "  ARGUS_DATASET_PATH=$HOME/Documents/datasets/indy_loco/indy_20161005_06.mat "
+                "ros2 run argus_inference inference_node"
+            )
+        self._dataset_path = os.path.expanduser(dataset_path)
+
+        self.get_logger().info(
+            "model path: training on the .mat at startup (counts only; "
+            "set ARGUS_MODEL_PATH to use a saved model)"
+        )
         self.get_logger().info(f"dataset: {self._dataset_path}")
         self.get_logger().info(
             f"bin_s={self._bin_s} unit_index={self._unit_index} "
@@ -168,21 +251,12 @@ class InferenceNode(Node):
         acc = float(self._model.score(X_test, y_test))
         self.get_logger().info(f"offline 4-way intent accuracy: {acc:.3f}")
 
-        self._rx_count = 0
-
-        self._sub = self.create_subscription(
-            NeuralFrame,
-            self._input_topic,
-            self._neural_callback,
-            qos_profile_sensor_data,
-        )
-
-        self.get_logger().info(
-            f"argus_inference online: subscribing to '{self._input_topic}' "
-            f"and publishing '{self._cmd_topic}'"
-        )
-
     def _frame_to_features(self, msg: NeuralFrame) -> np.ndarray:
+        if self._layout is not None:
+            return _frame_features(
+                msg, self._layout["features"], int(self._layout["channels"])
+            )
+
         x = np.zeros((1, self._max_channels), dtype=np.float32)
 
         usable = min(int(msg.channel_count), self._max_channels, len(msg.channels))
