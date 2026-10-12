@@ -1,4 +1,120 @@
-# inference_node.py
+"""
+The Argus decoder node: one NeuralFrame in, one Twist out, twenty times a second.
+
+Where it sits
+-------------
+
+This is the last stage of the Argus Cybernetics stack. Upstream, the codec
+in the Arty Z7's fabric computes, for each of 96 channels and each 50 ms
+bin, a threshold-crossing count and a mean-square spike-band power; the
+firmware sends one frame per bin over UDP; ``argus_sensors`` receives it
+and bridges it onto ``/argus/sensors/neural_telemetry`` as a
+:class:`argus_core.msg.NeuralFrame`. This node subscribes to that topic,
+classifies each frame into one of four reach intents, and publishes a
+:class:`geometry_msgs.msg.Twist` on ``/cmd_vel``, the velocity command a
+ROS robot base listens for::
+
+    NeuralFrame (channels[96], power[96], sample, t)
+        -> feature vector -> StandardScaler -> LDA -> intent in {0, 1, 2, 3}
+        -> Twist (linear.x, angular.z) on /cmd_vel
+
+Nothing consumes ``/cmd_vel`` yet; the loop is open by design at this
+version.
+
+Two model paths
+---------------
+
+Which one is active is logged at startup on a line that begins
+``model path:``.
+
+``ARGUS_MODEL_PATH`` set
+    The demo path. The file is a pickle written by
+    ``argus_sim/tools/decode_test.py --save-model``: a dict with a fitted
+    scikit-learn ``pipeline`` and a ``layout`` that describes its input,
+    ``{'features': ['counts', 'power'], 'channels': 96, 'bin_len': 1500,
+    'mult': 3.5}``. :func:`_check_model_bundle` refuses a bundle whose
+    feature names are unknown or whose pipeline width is not
+    ``len(features) * channels``, and :func:`_frame_features` builds the
+    vector in layout order, ``[counts..., power...]``. With counts plus
+    power at 3.5 sigma that model scores 53.5 % in 5-fold cross-validation
+    over the full session; ``decode_test.py`` holds the comparison with
+    the lab's spike-sorted units. Unpickling runs code: load only pickles
+    you made.
+
+``ARGUS_MODEL_PATH`` unset
+    The original path, kept for the counts-only comparison. The node reads
+    the Sabes lab session given by ``ARGUS_DATASET_PATH`` (MATLAB v7.3, so
+    HDF5), bins the spike times of unit ``ARGUS_UNIT_INDEX`` on each
+    channel (1 by default, the first sorted unit; 0 is the unsorted hash)
+    into ``ARGUS_BIN_S`` bins, fits the same StandardScaler and LDA
+    pipeline on an 80/20 stratified split, and logs the held-out accuracy
+    (about 44 %). The feature vector is then counts only,
+    ``ARGUS_MAX_CHANNELS`` wide.
+
+Intents and the command
+-----------------------
+
+Labels come from the session's behaviour: at each bin centre, the angle
+from the cursor to the reach target, quadrantised. The saved model was
+trained on the same four classes. Each intent maps to one fixed command
+(:func:`_intent_to_twist`); up on the screen is forward, left and right
+are turns, down is reverse:
+
+======  ================  =========  ===========
+intent  reach direction   linear.x   angular.z
+======  ================  =========  ===========
+0       right (+x)        0.15 m/s   -0.70 rad/s
+1       up (+y)           0.25 m/s   0.00 rad/s
+2       left (-x)         0.15 m/s   0.70 rad/s
+3       down (-y)         -0.15 m/s  0.00 rad/s
+======  ================  =========  ===========
+
+This is a demonstration mapping, four fixed commands. A continuous
+decoder, a regressor on cursor velocity instead of a classifier on
+direction, would drop into the same node and publish the same message
+type.
+
+Environment and parameters
+--------------------------
+
+``ARGUS_MODEL_PATH``
+    Saved model bundle; selects the demo path. The launch exports it from
+    ``model:=``.
+``ARGUS_DATASET_PATH``
+    The session ``.mat``; required when ``ARGUS_MODEL_PATH`` is unset.
+``ARGUS_BIN_S``
+    Bin length in seconds for training at startup. Default ``0.05``, the
+    fabric's bin.
+``ARGUS_UNIT_INDEX``
+    Which unit's spike times to bin per channel when training at startup.
+    Default ``1``.
+``ARGUS_MAX_CHANNELS``
+    Width of the counts-only vector. Default ``96``.
+
+ROS parameters: ``input_topic`` (default ``/argus/sensors/neural_telemetry``)
+and ``cmd_topic`` (default ``/cmd_vel``), set by ``argus_bringup``'s
+``config/argus.yaml``. The subscription uses the sensor-data QoS profile
+(best effort, keep last 5), so a late host drops frames rather than
+queueing them; the publisher is reliable with depth 10.
+
+Running it
+----------
+
+The stack brings the node up through the launch::
+
+    ros2 launch argus_bringup argus.launch.py model:=$HOME/argus_model.pkl
+
+or on its own::
+
+    ARGUS_MODEL_PATH=$HOME/argus_model.pkl ros2 run argus_inference inference_node
+
+Every twentieth frame, once a second at the fabric's rate, the node logs
+``sample=... t=... intent=... -> vx=... wz=...``. An empty frame
+(``channel_count == 0``) is warned about and skipped. The feature-vector
+and bundle contracts are pinned by ``test/test_model_path.py``; the
+offline validation behind the accuracy figures is
+``argus_sim/tools/decode_test.py``.
+"""
 from dataclasses import dataclass
 import math
 import os
