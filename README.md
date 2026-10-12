@@ -47,16 +47,36 @@ ARGUS_DATASET_PATH=$HOME/argus_data/indy_20161005_06.mat \
 
 ## Documentation
 
-The module documentation is built with Sphinx from the docstrings:
-```
+The docstrings are the documentation; Sphinx only renders them. `docs/`
+holds the site: `conf.py`, an index, and one page per module. A module's
+page prints its module docstring as the narrative and then every function
+and class in source order, the underscore-named helpers included, since in
+this package they are the interesting part. `inference_node.py` opens with
+that narrative: where the node sits in the stack, the two model paths, the
+intent-to-Twist table, and every environment variable and parameter with
+its default.
+
+Build it from the package root with the workspace sourced, so that autodoc
+imports the real `rclpy`, `argus_core`, numpy and scikit-learn:
+
+```bash
 pip install -r docs/requirements.txt
+source /opt/ros/humble/setup.bash && source ~/Documents/argus_ws/install/setup.bash
 sphinx-build -b html docs docs/_build/html
-xdg-open docs/_build/html/index.html
+xdg-open docs/_build/html/inference_node.html
 ```
 
-With the workspace sourced, autodoc imports the real modules. Without ROS
-the missing imports are mocked and the build still succeeds; that is how CI
-builds it, with warnings treated as errors.
+Without ROS the missing imports are mocked and the build prints which.
+That is how the `docs` job in CI builds the site on a plain runner, with
+warnings as errors, so a docstring that does not parse fails the push.
+
+Docstrings are numpy style, and not by taste: `colcon test` runs
+ament_pep257 over every docstring with the numpy section rules, so the
+summary goes on the line after the opening quotes and ends with a period,
+and a section header is a numpy one with a dashed underline (a
+Google-style `Args:` fails the test). `_load_model_bundle` and
+`_frame_features` in `inference_node.py` are the pattern. A new function
+is on the page once `docs/inference_node.rst` has a line for it.
 
 ## Data
 
