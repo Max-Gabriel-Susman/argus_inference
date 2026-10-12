@@ -45,6 +45,19 @@ ARGUS_DATASET_PATH=$HOME/argus_data/indy_20161005_06.mat \
   python3 scripts/poc_decode_cmdvel.py
 ```
 
+## Documentation
+
+The module documentation is built with Sphinx from the docstrings:
+```
+pip install -r docs/requirements.txt
+sphinx-build -b html docs docs/_build/html
+xdg-open docs/_build/html/index.html
+```
+
+With the workspace sourced, autodoc imports the real modules. Without ROS
+the missing imports are mocked and the build still succeeds; that is how CI
+builds it, with warnings treated as errors.
+
 ## Data
 
 No large file lives in any Argus repository. Raw datasets go in `~/argus_data/`
